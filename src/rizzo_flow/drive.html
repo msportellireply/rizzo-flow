@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rizzo Flow · Guida</title>
+<link rel="icon" type="image/png" href="/playground/logo.png">
+<style>
+:root { font: 15px/1.5 system-ui, sans-serif; color: #e9eef2; background: #101820; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+header { padding: 13px max(18px, calc((100vw - 1180px)/2)); background: #192631; border-bottom: 1px solid #344653; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+header h1 { margin: 0; font-size: 18px; }
+header a { color: #b3d5ec; }
+main { max-width: 1180px; margin: auto; padding: 20px; display: grid; grid-template-columns: minmax(300px, 620px) minmax(270px, 1fr); gap: 18px; }
+@media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+.panel { background: #1a2934; border: 1px solid #344653; border-radius: 12px; padding: 16px; min-width: 0; }
+canvas { width: 100%; height: auto; display: block; background: #334a40; border-radius: 8px; }
+.controls { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
+button { background: #205c78; color: white; border: 1px solid #5286a0; border-radius: 6px; padding: 8px 13px; cursor: pointer; font: inherit; }
+button:hover { background: #28769a; }
+button:disabled { opacity: .5; cursor: default; }
+button.secondary { background: #263945; }
+.metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
+@media (max-width: 500px) { .metrics { grid-template-columns: repeat(2, 1fr); } }
+.metric { background: #263945; border-radius: 7px; padding: 9px; }
+.metric strong { display: block; font-size: 19px; }
+.metric span, .hint { color: #adbec9; font-size: 12px; }
+h2 { font-size: 17px; margin: 0 0 9px; }
+p { margin: 6px 0 12px; }
+#status { min-height: 48px; font-weight: 600; }
+.row { display: grid; grid-template-columns: 120px 1fr 55px; align-items: center; gap: 8px; margin: 7px 0; }
+.bar { height: 13px; border-radius: 10px; background: #344653; overflow: hidden; }
+.bar i { display: block; height: 100%; background: #4dc8a2; }
+.row.chosen { color: #8af0c8; font-weight: 700; }
+pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; background: #12202a; border-radius: 7px; padding: 10px; overflow: auto; max-height: 280px; }
+#log { max-height: 220px; overflow: auto; margin: 0; padding-left: 24px; font-size: 13px; }
+#log li { margin: 5px 0; }
+.error { color: #ffc4ad; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Rizzo Flow · Guida simulata</h1>
+  <a href="/playground">Playground</a>
+  <a href="/snake">Snake</a>
+  <span id="health" class="hint">Connessione al modello…</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>Strada a tre corsie</h2>
+    <canvas id="road" width="600" height="560" aria-label="Strada vista dall'alto con auto e ostacoli" role="img"></canvas>
+    <div class="controls">
+      <button id="run">Avvia</button>
+      <button id="step" class="secondary">Un passo</button>
+      <button id="reset" class="secondary">Ricomincia</button>
+    </div>
+    <div class="metrics">
+      <div class="metric"><strong id="distance">0 m</strong><span>Percorso / 600 m</span></div>
+      <div class="metric"><strong id="speed">0 km/h</strong><span>Velocità</span></div>
+      <div class="metric"><strong id="lane">2</strong><span>Corsia</span></div>
+      <div class="metric"><strong id="turns">0</strong><span>Decisioni</span></div>
+    </div>
+    <p class="hint">Ogni passo dura un secondo simulato. Il tempo si ferma mentre il modello decide. L'auto può accelerare, mantenere, frenare o cambiare corsia. Gli ostacoli sono fissi.</p>
+    <p id="status" role="status"></p>
+  </section>
+  <section class="panel">
+    <h2>Decisione del modello</h2>
+    <p id="last">Nessuna decisione ancora.</p>
+    <div id="probabilities"></div>
+    <h2>Sensori inviati</h2>
+    <pre id="sensors"></pre>
+    <h2>Registro</h2>
+    <ol id="log"></ol>
+    <p class="hint">Le probabilità sono punteggi condizionati alle azioni proposte; non misurano da sole la sicurezza. Questa è una simulazione didattica, non un controllo per veicoli reali.</p>
+  </section>
+</main>
+<script>
+// Deterministic simulation. Coordinates and distances are metres; lanes are 0, 1, 2.
+const Drive = (() => {
+  const finish = 600;
+  const obstacles = [
+    {at: 75, lane: 1}, {at: 120, lane: 0}, {at: 165, lane: 2},
+    {at: 210, lane: 1}, {at: 250, lane: 0}, {at: 295, lane: 2},
+    {at: 335, lane: 1}, {at: 380, lane: 0}, {at: 420, lane: 2},
+    {at: 465, lane: 1}, {at: 505, lane: 0}, {at: 550, lane: 2},
+  ];
+  const labels = {
+    accelerate: 'Accelera', hold: 'Mantieni', brake: 'Frena',
+    left: 'Sposta a sinistra', right: 'Sposta a destra',
+  };
+  const reset = () => ({position: 0, speed: 8, lane: 1, turns: 0, outcome: null});
+  function options(state) {
+    const ids = ['accelerate', 'hold', 'brake'];
+    if (state.lane > 0) ids.push('left');
+    if (state.lane < 2) ids.push('right');
+    return ids;
+  }
+  function sensors(state) {
+    const ahead = [0, 1, 2].map(lane => {
+      const next = obstacles.find(o => o.lane === lane && o.at + 4 >= state.position);
+      return next ? Math.max(0, Math.round(next.at - state.position)) : null;
+    });
+    return {
+      position_m: Math.round(state.position), speed_m_s: state.speed,
+      lane: state.lane + 1, finish_distance_m: Math.max(0, Math.round(finish - state.position)),
+      obstacle_ahead_m_by_lane: ahead,
+      braking_distance_m: Math.ceil(state.speed * state.speed / 12),
+    };
+  }
+  function advance(state, action) {
+    if (state.outcome || !options(state).includes(action)) throw Error('Azione non valida');
+    const nextLane = state.lane + (action === 'left' ? -1 : action === 'right' ? 1 : 0);
+    const nextSpeed = Math.max(0, Math.min(22, state.speed + (
+      action === 'accelerate' ? 3 : action === 'brake' ? -6 : 0
+    )));
+    const nextPosition = Math.min(finish, state.position + (state.speed + nextSpeed) / 2);
+    // A lane change occupies both lanes for the full tick. Check the swept path, not just the endpoint.
+    const hit = obstacles.some(o =>
+      (o.lane === state.lane || o.lane === nextLane) &&
+      state.position <= o.at + 4 && nextPosition >= o.at - 4
+    );
+    return {
+      position: nextPosition, speed: nextSpeed, lane: nextLane, turns: state.turns + 1,
+      outcome: hit ? 'crash' : nextPosition >= finish ? 'finish' : null,
+    };
+  }
+  return {finish, obstacles, labels, reset, options, sensors, advance};
+})();
+
+const canvas = document.getElementById('road');
+const ctx = canvas.getContext('2d');
+const el = id => document.getElementById(id);
+let state = Drive.reset();
+let running = false;
+let pending = false;
+let generation = 0;
+let controller = null;
+
+function paint() {
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = '#395b45'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#353c45'; ctx.fillRect(125, 0, 350, h);
+  ctx.fillStyle = '#f2e5af'; ctx.fillRect(125, 0, 4, h); ctx.fillRect(471, 0, 4, h);
+  const scale = 3.1, carY = h - 95;
+  for (const boundary of [1, 2]) {
+    const x = 125 + boundary * (350 / 3);
+    ctx.fillStyle = '#a7afb0';
+    for (let y = ((state.position * scale) % 34) - 34; y < h; y += 34) ctx.fillRect(x - 2, y, 4, 18);
+  }
+  for (const o of Drive.obstacles) {
+    const y = carY - (o.at - state.position) * scale;
+    if (y < -30 || y > h + 30) continue;
+    const x = 125 + (o.lane + .5) * (350 / 3);
+    ctx.fillStyle = '#ff865b'; ctx.fillRect(x - 31, y - 15, 62, 30);
+    ctx.fillStyle = '#5b271b'; ctx.fillRect(x - 24, y - 4, 48, 8);
+  }
+  const goalY = carY - (Drive.finish - state.position) * scale;
+  if (goalY > -12 && goalY < h + 12) {
+    ctx.fillStyle = '#f7f7f2'; ctx.fillRect(125, goalY - 5, 350, 10);
+    ctx.fillStyle = '#141d24';
+    for (let i = 0; i < 12; i += 2) ctx.fillRect(125 + i * 29.2, goalY - 5, 29.2, 5);
+  }
+  const carX = 125 + (state.lane + .5) * (350 / 3);
+  ctx.fillStyle = state.outcome === 'crash' ? '#ff4848' : '#55c9ec';
+  ctx.fillRect(carX - 23, carY - 30, 46, 60);
+  ctx.fillStyle = '#102e3d'; ctx.fillRect(carX - 17, carY - 16, 34, 18);
+  ctx.fillStyle = '#ecf4f8'; ctx.fillRect(carX - 18, carY - 27, 8, 5); ctx.fillRect(carX + 10, carY - 27, 8, 5);
+}
+
+function render() {
+  paint();
+  el('distance').textContent = `${Math.round(state.position)} m`;
+  el('speed').textContent = `${Math.round(state.speed * 3.6)} km/h`;
+  el('lane').textContent = String(state.lane + 1);
+  el('turns').textContent = String(state.turns);
+  el('sensors').textContent = JSON.stringify(Drive.sensors(state), null, 2);
+  el('run').textContent = running ? 'Pausa' : 'Avvia';
+  el('step').disabled = pending || running || !!state.outcome;
+  el('run').disabled = !!state.outcome;
+  if (state.outcome === 'crash') el('status').textContent = 'Collisione. Premi Ricomincia per riprovare.';
+  else if (state.outcome === 'finish') el('status').textContent = `Traguardo raggiunto in ${state.turns} decisioni!`;
+  else if (pending) el('status').textContent = 'Il modello sta scegliendo la prossima azione…';
+  else if (!el('status').classList.contains('error')) el('status').textContent = running ? 'Guida in corso.' : 'In pausa. Premi Avvia o Un passo.';
+}
+
+function requestFor(snapshot) {
+  const actions = Drive.options(snapshot);
+  return {
+    state: {
+      task: 'Reach the finish without touching stationary obstacles on a three-lane road.',
+      dynamics: 'One action advances one second. Accelerate adds 3 m/s, brake subtracts 6 m/s, speed stays between 0 and 22 m/s. Hold and lane changes keep speed. Distance moved is the average of old and new speed for one second. A lane change occupies both lanes during that second. An obstacle is hit if the car passes within 4 m of it in an occupied lane. Lane changes can cross into an obstacle. Null means no obstacle ahead in that lane.',
+      sensors: Drive.sensors(snapshot),
+    },
+    questions: {
+      action: {
+        type: 'choice',
+        instructions: 'Choose the single safest action that makes progress toward the finish. Avoid all collisions. Use the current speed, braking distance, obstacles and lane-change dynamics. Pick only an available action.',
+        options: actions.map(id => ({id, description: Drive.labels[id]})),
+        policy: {allow_abstain: false},
+      },
+    },
+  };
+}
+
+async function step() {
+  if (pending || state.outcome) return;
+  pending = true;
+  const currentGeneration = generation;
+  const snapshot = {...state};
+  controller = new AbortController();
+  el('status').classList.remove('error');
+  render();
+  try {
+    const response = await fetch('/v1/decisions', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(requestFor(snapshot)), signal: controller.signal,
+    });
+    if (!response.ok) throw Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    const data = await response.json();
+    if (currentGeneration !== generation) return;
+    const answer = data.answers.action;
+    const action = answer.choice;
+    if (answer.status !== 'ok' || !Drive.options(snapshot).includes(action)) {
+      running = false;
+      throw Error(`Il modello non ha scelto un'azione valida (status: ${answer.status}).`);
+    }
+    state = Drive.advance(snapshot, action);
+    const latency = Math.round((data.timing?.total_seconds || 0) * 1000);
+    el('last').textContent = `Passo ${state.turns}: ${Drive.labels[action]} · ${latency} ms di elaborazione`;
+    const probabilities = el('probabilities');
+    probabilities.replaceChildren();
+    for (const id of Drive.options(snapshot)) {
+      const p = answer.probabilities[id] || 0;
+      const row = document.createElement('div'); row.className = `row${id === action ? ' chosen' : ''}`;
+      const label = document.createElement('span'); label.textContent = Drive.labels[id];
+      const track = document.createElement('span'); track.className = 'bar';
+      const bar = document.createElement('i'); bar.style.width = `${Math.max(0, Math.min(100, p * 100))}%`;
+      track.append(bar);
+      const value = document.createElement('span'); value.textContent = `${(p * 100).toFixed(1)}%`;
+      row.append(label, track, value); probabilities.append(row);
+    }
+    const line = document.createElement('li');
+    line.textContent = `${state.turns}. ${Drive.labels[action]} → ${Math.round(state.position)} m, ${Math.round(state.speed * 3.6)} km/h, corsia ${state.lane + 1}${state.outcome ? ` · ${state.outcome}` : ''}`;
+    el('log').prepend(line);
+    if (state.outcome) running = false;
+  } catch (error) {
+    if (currentGeneration === generation && error.name !== 'AbortError') {
+      running = false;
+      el('status').classList.add('error');
+      el('status').textContent = `Errore: ${error.message}`;
+    }
+  } finally {
+    if (currentGeneration === generation) {
+      pending = false;
+      controller = null;
+      render();
+      if (running && !state.outcome) setTimeout(step, 250);
+    }
+  }
+}
+
+el('run').addEventListener('click', () => {
+  running = !running;
+  el('status').classList.remove('error');
+  render();
+  if (running && !pending) step();
+});
+el('step').addEventListener('click', step);
+el('reset').addEventListener('click', () => {
+  generation++;
+  if (controller) controller.abort();
+  controller = null; pending = false; running = false; state = Drive.reset();
+  el('probabilities').replaceChildren(); el('log').replaceChildren();
+  el('last').textContent = 'Nessuna decisione ancora.';
+  el('status').classList.remove('error'); render();
+});
+fetch('/health').then(r => r.json()).then(data => {
+  el('health').textContent = data.status === 'ready' ? `Modello pronto · ${data.model.runtime}` : 'Modello non pronto';
+}).catch(() => { el('health').textContent = 'Servizio non disponibile'; });
+render();
+</script>
+</body>
+</html>

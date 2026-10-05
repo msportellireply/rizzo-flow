@@ -83,6 +83,16 @@ esempi pronti, editor JSON grezzo per entrambi gli endpoint, barre di probabilit
 (round-trip, inferenza, prefill), token dello state in cache, numero di microbatch e comando cURL.
 Pagina singola senza dipendenze esterne, servita dallo stesso processo.
 
+## Demo guida simulata
+
+Con il server avviato: <http://127.0.0.1:8017/drive>. Una strada vista dall'alto con tre corsie,
+ostacoli fissi e un traguardo a 600 m. A ogni secondo simulato il browser invia posizione,
+velocità, corsia e distanza degli ostacoli a `POST /v1/decisions`; il modello sceglie fra accelerare,
+mantenere, frenare e cambiare corsia. La pagina mostra probabilità, sensori e registro delle mosse.
+Sono disponibili avanzamento automatico, passo singolo e riavvio. Il tempo simulato si ferma mentre
+il modello risponde; collisioni e arrivo sono calcolati dal gioco. È una demo didattica, non un
+controllo per veicoli reali.
+
 ## Demo Snake
 
 Con il server avviato: <http://127.0.0.1:8017/snake>. Ogni mossa del serpente è una richiesta

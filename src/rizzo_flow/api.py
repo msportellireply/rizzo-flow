@@ -24,6 +24,7 @@ from .schema import Request
 API_KEY_ENV = "RIZZO_API_KEY"
 PLAYGROUND = Path(__file__).with_name("playground.html")
 SNAKE = Path(__file__).with_name("snake.html")
+DRIVE = Path(__file__).with_name("drive.html")
 LOGO = Path(__file__).with_name("logo.png")
 
 
@@ -103,6 +104,10 @@ def create_app(engine, api_key=None):
     @app.get("/snake", response_class=HTMLResponse, include_in_schema=False)
     def snake():
         return SNAKE.read_text(encoding="utf-8")
+
+    @app.get("/drive", response_class=HTMLResponse, include_in_schema=False)
+    def drive():
+        return DRIVE.read_text(encoding="utf-8")
 
     @app.get("/playground/logo.png", include_in_schema=False)
     def logo():
