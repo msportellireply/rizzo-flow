@@ -72,7 +72,7 @@ pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; background
     <pre id="sensors"></pre>
     <h2>Registro</h2>
     <ol id="log"></ol>
-    <p class="hint">Le probabilità sono punteggi condizionati alle azioni proposte; non misurano da sole la sicurezza. Questa è una simulazione didattica, non un controllo per veicoli reali.</p>
+    <p class="hint">Il simulatore calcola per ogni azione la posizione successiva e se resta una via sicura nei due passi seguenti; il modello confronta queste previsioni. Le probabilità non misurano da sole la sicurezza. Questa è una simulazione didattica, non un controllo per veicoli reali.</p>
   </section>
 </main>
 <script>
@@ -125,7 +125,23 @@ const Drive = (() => {
       outcome: hit ? 'crash' : nextPosition >= finish ? 'finish' : null,
     };
   }
-  return {finish, obstacles, labels, reset, options, sensors, advance};
+  function hasSafeContinuation(state, remaining) {
+    if (state.outcome === 'finish') return true;
+    if (state.outcome === 'crash') return false;
+    if (remaining === 0) return true;
+    return options(state).some(action => hasSafeContinuation(advance(state, action), remaining - 1));
+  }
+  function forecast(state, action) {
+    const next = advance(state, action);
+    return {
+      position_m: Math.round(next.position * 10) / 10,
+      speed_m_s: next.speed,
+      lane: next.lane + 1,
+      collision: next.outcome === 'crash',
+      safe_continuation_two_more_steps: hasSafeContinuation(next, 2),
+    };
+  }
+  return {finish, obstacles, labels, reset, options, sensors, advance, forecast};
 })();
 
 const canvas = document.getElementById('road');
@@ -188,15 +204,21 @@ function requestFor(snapshot) {
   const actions = Drive.options(snapshot);
   return {
     state: {
-      task: 'Reach the finish without touching stationary obstacles on a three-lane road.',
-      dynamics: 'One action advances one second. Accelerate adds 3 m/s, brake subtracts 6 m/s, speed stays between 0 and 22 m/s. Hold and lane changes keep speed. Distance moved is the average of old and new speed for one second. A lane change occupies both lanes during that second. An obstacle is hit if the car passes within 4 m of it in an occupied lane. Lane changes can cross into an obstacle. Null means no obstacle ahead in that lane.',
+      task: 'Drive to the finish without a collision. Survival is more important than speed.',
+      dynamics: 'One action advances one second. Speed is capped at 22 m/s. A lane change occupies both the old and new lanes during the step. An obstacle is hit when the car passes within 4 m of it in either occupied lane. Null means no obstacle ahead.',
       sensors: Drive.sensors(snapshot),
     },
     questions: {
       action: {
         type: 'choice',
-        instructions: 'Choose the single safest action that makes progress toward the finish. Avoid all collisions. Use the current speed, braking distance, obstacles and lane-change dynamics. Pick only an available action.',
-        options: actions.map(id => ({id, description: Drive.labels[id]})),
+        instructions: 'Choose an action that avoids collision now AND still has a safe continuation for the next two steps. The simulator has already calculated the exact result of every available action below; trust those forecasts. Never choose an action marked collision or no safe continuation. Among the viable actions, make progress toward the finish.',
+        options: actions.map(id => {
+          const f = Drive.forecast(snapshot, id);
+          return {
+            id,
+            description: `${id}: after one second: position ${f.position_m} m, speed ${f.speed_m_s} m/s, lane ${f.lane}. ${f.collision ? 'COLLISION on this step.' : f.safe_continuation_two_more_steps ? 'Safe continuation exists for two more steps.' : 'NO SAFE CONTINUATION: leads to a crash within two steps.'}`,
+          };
+        }),
         policy: {allow_abstain: false},
       },
     },
@@ -232,8 +254,11 @@ async function step() {
     probabilities.replaceChildren();
     for (const id of Drive.options(snapshot)) {
       const p = answer.probabilities[id] || 0;
+      const forecast = Drive.forecast(snapshot, id);
       const row = document.createElement('div'); row.className = `row${id === action ? ' chosen' : ''}`;
-      const label = document.createElement('span'); label.textContent = Drive.labels[id];
+      const label = document.createElement('span');
+      label.textContent = `${Drive.labels[id]}${forecast.safe_continuation_two_more_steps ? '' : ' ⚠'}`;
+      label.title = forecast.collision ? 'Collisione immediata' : forecast.safe_continuation_two_more_steps ? 'Esiste una continuazione sicura' : 'Nessuna continuazione sicura nei prossimi due passi';
       const track = document.createElement('span'); track.className = 'bar';
       const bar = document.createElement('i'); bar.style.width = `${Math.max(0, Math.min(100, p * 100))}%`;
       track.append(bar);
