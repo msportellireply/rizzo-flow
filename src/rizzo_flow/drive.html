@@ -20,6 +20,7 @@ canvas { width: 100%; height: auto; display: block; background: #334a40; border-
 button { background: #205c78; color: white; border: 1px solid #5286a0; border-radius: 6px; padding: 8px 13px; cursor: pointer; font: inherit; }
 button:hover { background: #28769a; }
 button:disabled { opacity: .5; cursor: default; }
+button.rec.on { border-color: #ff865b; color: #ffb39c; }
 button.secondary { background: #263945; }
 .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
 @media (max-width: 500px) { .metrics { grid-template-columns: repeat(2, 1fr); } }
@@ -54,6 +55,7 @@ pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; background
       <button id="run">Avvia</button>
       <button id="step" class="secondary">Un passo</button>
       <button id="reset" class="secondary">Ricomincia</button>
+      <button id="rec" class="secondary">Registra GIF</button>
     </div>
     <div class="metrics">
       <div class="metric"><strong id="distance">0 m</strong><span>Percorso / 600 m</span></div>
@@ -63,6 +65,7 @@ pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; background
     </div>
     <p class="hint">Ogni passo dura un secondo simulato. Il tempo si ferma mentre il modello decide. L'auto può accelerare, mantenere, frenare o cambiare corsia. Gli ostacoli sono fissi.</p>
     <p id="status" role="status"></p>
+    <p id="recNote" class="hint" hidden></p>
   </section>
   <section class="panel">
     <h2>Decisione del modello</h2>
@@ -198,20 +201,229 @@ function render() {
   else if (state.outcome === 'finish') el('status').textContent = `Traguardo raggiunto in ${state.turns} decisioni!`;
   else if (pending) el('status').textContent = 'Il modello sta scegliendo la prossima azione…';
   else if (!el('status').classList.contains('error')) el('status').textContent = running ? 'Guida in corso.' : 'In pausa. Premi Avvia o Un passo.';
+  el('rec').classList.toggle('on', Boolean(rec));
+  el('rec').textContent = rec ? `Ferma e salva · ${recStats().f} frame` : 'Registra GIF';
+  if (rec) capture();
+}
+
+// ---------- GIF recorder ----------
+// The recorder captures the rendered road and encodes a self-contained GIF in the browser.
+const REC = {width: 600, height: 560, maxFrames: 900, mergeMs: 30};
+let rec = null;
+
+function recStats() {
+  return {f: rec.frames + rec.queue.length + (rec.pending ? 1 : 0)};
+}
+
+function startRecording() {
+  const offscreen = document.createElement('canvas');
+  offscreen.width = REC.width; offscreen.height = REC.height;
+  rec = {ctx: offscreen.getContext('2d'), chunks: [], queue: [], pending: null, frames: 0, bytes: 0};
+  el('recNote').hidden = true;
+  render();
+}
+
+function capture() {
+  const now = performance.now();
+  paintDriveFrame(rec.ctx);
+  const pixels = rec.ctx.getImageData(0, 0, REC.width, REC.height).data;
+  if (rec.pending && now - rec.pending.time < REC.mergeMs) { rec.pending.pixels = pixels; return; }
+  if (rec.pending) { rec.queue.push({pixels: rec.pending.pixels, ms: now - rec.pending.time}); setTimeout(drainRecording, 0); }
+  rec.pending = {pixels, time: now};
+  if (recStats().f >= REC.maxFrames) setTimeout(() => rec && stopRecording(true), 0);
+}
+
+function drainRecording() {
+  if (!rec) return;
+  for (const frame of rec.queue.splice(0)) {
+    const chunk = gifFrame(frame.pixels, REC.width, REC.height, Math.max(2, Math.round(frame.ms / 10)));
+    rec.chunks.push(chunk); rec.bytes += chunk.length; rec.frames++;
+  }
+}
+
+function paintDriveFrame(target) {
+  target.drawImage(canvas, 0, 0);
+  target.fillStyle = 'rgba(16, 24, 32, .82)'; target.fillRect(8, 8, 270, 55);
+  target.fillStyle = '#fff'; target.font = '600 18px system-ui'; target.fillText('Rizzo Flow · Guida', 18, 31);
+  target.font = '13px system-ui'; target.fillText(`${Math.round(state.position)} m · ${Math.round(state.speed * 3.6)} km/h · corsia ${state.lane + 1}`, 18, 51);
+}
+
+function finishRecording() {
+  if (rec.pending) rec.queue.push({pixels: rec.pending.pixels, ms: 1500});
+  rec.pending = null; drainRecording();
+  const w = REC.width, h = REC.height;
+  const head = [0x47,0x49,0x46,0x38,0x39,0x61,w&255,w>>8,h&255,h>>8,0,0,0,0x21,0xff,0x0b,...[...'NETSCAPE2.0'].map(c=>c.charCodeAt(0)),3,1,0,0,0];
+  const result = {blob: new Blob([new Uint8Array(head), ...rec.chunks, new Uint8Array([0x3b])], {type:'image/gif'}), frames: rec.frames};
+  rec = null; return result;
+}
+
+function stopRecording(full = false) {
+  const {blob, frames} = finishRecording();
+  const name = `rizzo-drive-${new Date().toISOString().slice(0,19).replace(/[-:]/g,'').replace('T','-')}.gif`;
+  const url = URL.createObjectURL(blob), link = document.createElement('a');
+  link.href = url; link.download = name; document.body.append(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  el('recNote').hidden = false;
+  el('recNote').textContent = `${full ? `Limite di ${REC.maxFrames} frame raggiunto. ` : ''}GIF salvata nei download: ${name} (${(blob.size / 1e6).toFixed(2)} MB, ${frames} frame).`;
+  render();
+}
+
+function gifFrame(rgba, w, h, delay) {
+  const n=w*h, keys=new Uint16Array(n), counts=new Uint32Array(32768), first=new Int32Array(32768);
+  for(let i=0,p=0;i<n;i++,p+=4){const k=((rgba[p]>>3)<<10)|((rgba[p+1]>>3)<<5)|(rgba[p+2]>>3);keys[i]=k;if(!counts[k]++)first[k]=p;}
+  const used=[];for(let k=0;k<32768;k++)if(counts[k])used.push(k);used.sort((a,b)=>counts[b]-counts[a]);
+  const palette=used.slice(0,256), lookup=new Int16Array(32768);palette.forEach((k,i)=>lookup[k]=i);
+  for(const k of used.slice(256)){let bi=0,bd=Infinity;for(let i=0;i<palette.length;i++){const d=(k>>10)-(palette[i]>>10),e=((k>>5)&31)-((palette[i]>>5)&31),f=(k&31)-(palette[i]&31),z=d*d+e*e+f*f;if(z<bd){bd=z;bi=i;}}lookup[k]=bi;}
+  let bits=1;while((1<<bits)<palette.length)bits++;const min=Math.max(2,bits),out=[0x21,0xf9,4,4,delay&255,delay>>8,0,0,0x2c,0,0,0,0,w&255,w>>8,h&255,h>>8,0x80|(bits-1)];
+  for(let i=0;i<(1<<bits);i++){const p=i<palette.length?first[palette[i]]:-1;out.push(p<0?0:rgba[p],p<0?0:rgba[p+1],p<0?0:rgba[p+2]);}out.push(min);
+  const block=[];let cur=0,held=0;const emit=(code,size)=>{cur|=code<<held;held+=size;while(held>=8){block.push(cur&255);cur>>>=8;held-=8;if(block.length===255){out.push(255,...block);block.length=0;}}};
+  const clear=1<<min,end=clear+1;let size=min+1,next=end+1,table=new Map(),prefix=lookup[keys[0]];emit(clear,size);
+  for(let i=1;i<n;i++){const px=lookup[keys[i]],k=(prefix<<8)|px,known=table.get(k);if(known!==undefined){prefix=known;continue;}emit(prefix,size);if(next===4096){emit(clear,size);table=new Map();size=min+1;next=end+1;}else{if(next>=(1<<size))size++;table.set(k,next++);}prefix=px;}emit(prefix,size);emit(end,size);if(held)block.push(cur&255);if(block.length)out.push(block.length,...block);out.push(0);return new Uint8Array(out);
 }
 
 function requestFor(snapshot) {
   const actions = Drive.options(snapshot);
   return {
     state: {
-      task: 'Drive to the finish without a collision. Survival is more important than speed.',
-      dynamics: 'One action advances one second. Speed is capped at 22 m/s. A lane change occupies both the old and new lanes during the step. An obstacle is hit when the car passes within 4 m of it in either occupied lane. Null means no obstacle ahead.',
-      sensors: Drive.sensors(snapshot),
-    },
+      role: `
+      You are the decision-making controller of a simulated autonomous vehicle.
+      Your only job is to select ONE valid action for the current simulation step.
+      You are not controlling a real vehicle.
+
+      The objective is hierarchical:
+      1. NEVER choose an action that causes a collision on the current step.
+      2. NEVER choose an action for which the simulator says there is NO SAFE CONTINUATION for the next two steps.
+      3. Among all actions that satisfy 1 and 2, prefer the action that makes the most useful progress toward the finish.
+      4. Do not optimize speed if doing so increases the risk of collision or removes safe future options.
+      5. Prefer maintaining a safe state over making unnecessary lane changes.
+      `,
+
+        current_state: {
+          position_m: Math.round(snapshot.position),
+          speed_m_s: snapshot.speed,
+          lane: snapshot.lane + 1,
+          finish_distance_m: Math.max(0, Math.round(Drive.finish - snapshot.position)),
+          obstacle_ahead_m_by_lane: Drive.sensors(snapshot).obstacle_ahead_m_by_lane,
+          braking_distance_m: Drive.sensors(snapshot).braking_distance_m
+        },
+
+        simulator_rules: `
+      Each action advances the simulation by exactly one second.
+
+      Available actions are:
+      - accelerate: increase speed by 3 m/s
+      - hold: keep current speed
+      - brake: decrease speed by 6 m/s
+      - left: move one lane to the left
+      - right: move one lane to the right
+
+      Speed is limited to 0..22 m/s.
+
+      A lane change occupies BOTH the old lane and the new lane for the entire one-second step.
+
+      A collision occurs if, during the step, the vehicle passes within 4 metres of an obstacle in ANY lane occupied during that step.
+
+      The simulator's forecast for each action is authoritative.
+      Do not try to recalculate or reinterpret the forecast.
+      `,
+
+        decision_principles: `
+      Treat the simulator forecasts as ground truth.
+
+      Safety has absolute priority over speed and progress.
+
+      A forecast with:
+      - collision = true
+      means the action is FORBIDDEN.
+
+      A forecast with:
+      - safe_continuation_two_more_steps = false
+      means the action is FORBIDDEN.
+
+      Only actions satisfying both conditions are eligible.
+
+      If multiple actions are eligible:
+      - prefer the action that preserves a safe future state;
+      - avoid unnecessary lane changes;
+      - prefer hold when it is already safe and provides sufficient progress;
+      - use brake when slowing materially improves safety;
+      - use a lane change when it is necessary to avoid an obstacle or clearly improves future safety;
+      - accelerate only when it remains safe and provides meaningful progress;
+      - never sacrifice safety merely to reach the finish sooner.
+      `,
+
+        available_actions: actions.map(id => {
+          const f = Drive.forecast(snapshot, id);
+
+          return {
+            id,
+            forecast: {
+              position_m: f.position_m,
+              speed_m_s: f.speed_m_s,
+              lane: f.lane,
+              collision: f.collision,
+              safe_continuation_two_more_steps: f.safe_continuation_two_more_steps
+            },
+            interpretation:
+              f.collision
+                ? "FORBIDDEN: immediate collision"
+                : !f.safe_continuation_two_more_steps
+                  ? "FORBIDDEN: no safe continuation within the next two steps"
+                  : "ELIGIBLE: satisfies the safety constraints"
+          };
+        })
+      },
     questions: {
       action: {
         type: 'choice',
-        instructions: 'Choose an action that avoids collision now AND still has a safe continuation for the next two steps. The simulator has already calculated the exact result of every available action below; trust those forecasts. Never choose an action marked collision or no safe continuation. Among the viable actions, make progress toward the finish.',
+        instructions: `
+Choose exactly ONE action from the provided action options.
+
+Follow this procedure in order:
+
+STEP 1 — ELIMINATE UNSAFE ACTIONS
+Reject every action where collision = true.
+Reject every action where safe_continuation_two_more_steps = false.
+
+STEP 2 — CHECK WHETHER A SAFE ACTION EXISTS
+At least one safe action should normally exist.
+Never invent an action that is not present in the options.
+
+STEP 3 — RANK THE SAFE ACTIONS
+Among the remaining eligible actions, use this priority order:
+
+A. SAFETY
+Prefer the action that leaves the strongest safe future state.
+
+B. NECESSITY
+If the current lane creates an upcoming obstacle problem, prefer a safe action that resolves it.
+
+C. STABILITY
+Prefer hold when it is safe and there is no reason to change speed or lane.
+Avoid unnecessary lane changes.
+
+D. PROGRESS
+When safety and stability are comparable, prefer the action that makes more progress toward the finish.
+
+E. SPEED
+Only prefer acceleration when it remains clearly safe and does not unnecessarily reduce future options.
+
+STEP 4 — FINAL VALIDATION
+Before returning the answer, verify:
+- the chosen action exists in the provided options;
+- collision is false;
+- safe_continuation_two_more_steps is true.
+
+IMPORTANT:
+The forecast fields are authoritative.
+Do not infer that an action is safe from intuition if its forecast says otherwise.
+Do not choose the fastest action merely because it reaches the finish sooner.
+Do not choose a lane change merely because another lane exists.
+Do not choose accelerate merely because the road appears clear.
+Never choose an action marked FORBIDDEN.
+
+Return only the selected action key.
+`,
         options: actions.map(id => {
           const f = Drive.forecast(snapshot, id);
           return {
@@ -292,6 +504,7 @@ el('run').addEventListener('click', () => {
   if (running && !pending) step();
 });
 el('step').addEventListener('click', step);
+el('rec').addEventListener('click', () => (rec ? stopRecording() : startRecording()));
 el('reset').addEventListener('click', () => {
   generation++;
   if (controller) controller.abort();

@@ -89,10 +89,11 @@ Con il server avviato: <http://127.0.0.1:8017/drive>. Una strada vista dall'alto
 ostacoli fissi e un traguardo a 600 m. A ogni secondo simulato il browser invia posizione,
 velocità, corsia e distanza degli ostacoli a `POST /v1/decisions`; il modello sceglie fra accelerare,
 mantenere, frenare e cambiare corsia. Ogni opzione include la posizione e la velocità risultanti,
-un eventuale urto e la disponibilità di una continuazione sicura nei due passi successivi.
+un eventuale urto e la possibilità di avanzare in sicurezza nei due passi successivi.
 La pagina mostra probabilità, sensori e registro delle mosse.
 Sono disponibili avanzamento automatico, passo singolo e riavvio. Il tempo simulato si ferma mentre
-il modello risponde; collisioni e arrivo sono calcolati dal gioco. È una demo didattica, non un
+il modello risponde; collisioni e arrivo sono calcolati dal gioco. A velocità zero non vengono
+offerte le azioni `hold` e `brake`, che lascerebbero l'auto ferma. È una demo didattica, non un
 controllo per veicoli reali.
 
 ## Demo Snake
