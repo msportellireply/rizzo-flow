@@ -2,11 +2,14 @@
 
 import copy
 import json
+import os
 
+import pytest
 from fastapi.testclient import TestClient
 from test_service import FakeBackend
 
 from rizzo_flow.api import create_app
+from rizzo_flow.driving import State, driving_answers, question_states
 from rizzo_flow.engine import Engine
 
 # Initial observation emitted by the extracted Simulation.observe().
@@ -75,3 +78,75 @@ def test_driving_reports_context_overflow():
         response = client.post("/drive/api/decide", json={"sequence": 0, "state": OBSERVATION})
         assert response.status_code == 422
         assert "no truncation" in response.json()["detail"]
+
+
+def driving_scenario(name):
+    """Controlled cases isolate decisions from unrelated background traffic."""
+    state = copy.deepcopy(OBSERVATION)
+    state["road_users"] = []
+    for lane in state["lanes"]:
+        lane.update(gap_ahead_m=220, gap_behind_m=220, lead_speed_kmh=0, rear_speed_kmh=0)
+    state["overtaking"].update(lead_gap_m=220, lead_speed_kmh=0, beneficial=False)
+    expected = {"pace": "cruise", "lane": "hold", "route": "left", "attention": "open_road"}
+    if name == "red_at_line":
+        state["signal"].update(
+            color="red", stop_line_distance_m=1.5, approach_phase="at_line", approach_speed_kmh=0
+        )
+        expected.update(pace="stop", attention="signal")
+    elif name == "pedestrian":
+        state["ego"].update(speed_kmh=35, stopping_distance_m=20)
+        state["road_users"] = [
+            {"kind": "pedestrian", "distance_m": 12, "lane": 1, "speed_kmh": 4, "crossing": True}
+        ]
+        state["navigation"].update(planned_direction="left", required_lane=0)
+        expected.update(pace="stop", lane="left", route="keep", attention="pedestrian")
+    elif name == "clear_turn":
+        state["navigation"].update(turning=True, planned_direction="left", required_lane=0)
+        state["signal"].update(
+            color="red", in_intersection=True, stop_line_distance_m=-5, approach_phase="clear"
+        )
+        state["overtaking"]["lane_change_allowed"] = False
+        expected.update(pace="slow", route="keep")
+    elif name != "clear":
+        raise ValueError(name)
+    return state, expected
+
+
+# Opt-in smoke checks of model behavior; FakeBackend tests above verify only integration.
+# Run: RIZZO_REAL=1 .venv/bin/pytest -q -s tests/test_driving.py -m integration
+@pytest.fixture(scope="module")
+def driving_backend():
+    if os.environ.get("RIZZO_REAL") != "1":
+        pytest.skip("set RIZZO_REAL=1 to load real weights")
+    from rizzo_flow.loader import load_backend
+
+    backend = load_backend(threads=4)
+    yield backend
+    backend.session.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("scenario", ["clear", "red_at_line", "pedestrian", "clear_turn"])
+def test_driving_model_scenarios(driving_backend, scenario):
+    state, expected = driving_scenario(scenario)
+    engine = Engine(driving_backend)
+    try:
+        result = driving_answers(engine, State.model_validate(state))
+    finally:
+        engine._worker.shutdown()
+    choices = {key: answer["choice"] for key, answer in result["answers"].items()}
+    print(scenario, choices, "input_tokens:", result["input_tokens"])
+    assert choices == expected
+
+
+def test_driving_observations_do_not_leak_future_routes_or_passed_signals():
+    state, _ = driving_scenario("clear_turn")
+    observations = question_states(State.model_validate(state))
+    assert set(observations["lane"]["navigation"]) == {"turning", "required_lane"}
+    assert "signal" not in observations["pace"]
+    assert "signal" not in observations["attention"]
+    assert observations["route"]["navigation"]["preferred_direction"] == "left"
+    state, _ = driving_scenario("red_at_line")
+    observations = question_states(State.model_validate(state))
+    assert observations["pace"]["signal"]["color"] == "red"
+    assert observations["attention"]["signal"]["approach_phase"] == "at_line"

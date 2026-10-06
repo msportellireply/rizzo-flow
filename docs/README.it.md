@@ -96,6 +96,23 @@ sono disponibili nel pannello. Spazio avvia/ferma, C cambia camera, R ripristina
 Three.js 0.180.0 è incluso e servito localmente; si usano i font di sistema.
 È una simulazione didattica: gli altri veicoli e l'assistenza sono deterministici.
 
+Le quattro domande in `src/rizzo_flow/driving.py` hanno istruzioni separate per
+velocità, corsia, percorso e attenzione. Ogni domanda riceve solo le osservazioni
+pertinenti e viene valutata separatamente dallo stesso Engine: la corsia non vede
+la preferenza del percorso futuro, e il semaforo d'ingresso non viene fornito a
+velocità/attenzione durante una svolta già iniziata. La velocità considera il percorso
+attuale, senza presumere che il cambio corsia sia riuscito; il percorso rispetta le
+svolte già impegnate. La categoria di attenzione è una classificazione indipendente.
+
+Per eseguire anche i quattro smoke test con il modello locale scaricato:
+
+```bash
+RIZZO_REAL=1 uv run --extra test pytest -q -s tests/test_driving.py -m integration
+```
+
+I casi coprono strada libera, rosso alla linea, pedone vicino e svolta libera già
+iniziata. Sono controlli mirati, non una misura generale dell'accuratezza di guida.
+
 Controlli dell'integrazione:
 
 ```bash
