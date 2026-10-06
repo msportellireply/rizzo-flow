@@ -18,6 +18,7 @@ from .compat import (
     resolve_model,
     to_native,
 )
+from .driving import register_driving
 from .responses import Response
 from .schema import Request
 
@@ -105,7 +106,7 @@ def create_app(engine, api_key=None):
     def snake():
         return SNAKE.read_text(encoding="utf-8")
 
-    @app.get("/drive", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/drive-classic", response_class=HTMLResponse, include_in_schema=False)
     def drive():
         return DRIVE.read_text(encoding="utf-8")
 
@@ -117,4 +118,5 @@ def create_app(engine, api_key=None):
     def root():
         return RedirectResponse("/playground")
 
+    register_driving(app, engine)
     return app

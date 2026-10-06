@@ -1,0 +1,77 @@
+"""Exercise the extracted driving UI and the real local question adapter."""
+
+import copy
+import json
+
+from fastapi.testclient import TestClient
+from test_service import FakeBackend
+
+from rizzo_flow.api import create_app
+from rizzo_flow.engine import Engine
+
+# Initial observation emitted by the extracted Simulation.observe().
+OBSERVATION = json.loads(
+    r"""{"ego":{"speed_kmh":0,"lane":1,"changing_lane":false,"stopping_distance_m":0},"environment":{"weather":"clear","time_of_day":"day","visibility_m":220,"grip":1,"speed_limit_kmh":50},"signal":{"color":"green","stop_line_distance_m":83.7,"changes_in_s":19,"in_intersection":false,"approach_phase":"clear","approach_speed_kmh":50,"comfortable_stopping_distance_m":1.5},"road_users":[{"kind":"car","distance_m":45.2,"lane":0,"speed_kmh":22.367814553901553,"crossing":false},{"kind":"car","distance_m":79.2,"lane":1,"speed_kmh":23.34861212829128,"crossing":false},{"kind":"cross_traffic","distance_m":93.2,"lane":-1,"speed_kmh":26.68075907835737,"crossing":true},{"kind":"car","distance_m":113.2,"lane":0,"speed_kmh":30.08439862076193,"crossing":false},{"kind":"car","distance_m":147.2,"lane":1,"speed_kmh":28.05159485852346,"crossing":false},{"kind":"car","distance_m":181.2,"lane":0,"speed_kmh":21.96846003457904,"crossing":false},{"kind":"car","distance_m":215.2,"lane":1,"speed_kmh":25.890651900786906,"crossing":false}],"lanes":[{"lane":0,"gap_ahead_m":45,"gap_behind_m":220,"lead_speed_kmh":22.367814553901553,"rear_speed_kmh":0,"safe_to_enter":true},{"lane":1,"gap_ahead_m":79,"gap_behind_m":220,"lead_speed_kmh":23.34861212829128,"rear_speed_kmh":0,"safe_to_enter":true}],"navigation":{"current_street":"Linden Avenue","heading":"Northbound","planned_direction":"undecided","requested_direction":"auto","preferred_direction":"left","required_lane":-1,"turning":false,"turn_clear":true,"turn_conflict_distance_m":null,"options":[{"direction":"straight","street":"Linden Avenue","vehicles_ahead":4,"visits":0},{"direction":"left","street":"Market Street","vehicles_ahead":0,"visits":0},{"direction":"right","street":"Market Street","vehicles_ahead":1,"visits":0}]},"overtaking":{"active":false,"passed_clear":false,"lead_gap_m":79,"lead_speed_kmh":23.34861212829128,"beneficial":false,"right_lane_clear":true,"lane_change_allowed":true}}"""
+)
+
+
+def test_driving_assets_and_local_decisions():
+    with TestClient(create_app(Engine(FakeBackend()))) as client:
+        page = client.get("/drive")
+        assert page.status_code == 200
+        assert "/drive/assets/app.js" in page.text
+        assert "TypeSafe API" not in page.text
+        assert client.get("/drive-classic").status_code == 200
+        for asset in (
+            "app.js",
+            "simulation.js",
+            "network.js",
+            "renderer.js",
+            "style.css",
+            "vendor/three.module.js",
+            "vendor/three.core.js",
+        ):
+            assert client.get(f"/drive/assets/{asset}").status_code == 200
+        status = client.get("/drive/api/status").json()
+        assert status["configured"] is True
+        response = client.post("/drive/api/decide", json={"sequence": 7, "state": OBSERVATION})
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["sequence"] == 7
+        assert result["model"] == status["model"]
+        assert result["input_tokens"] > 0
+        assert result["latency_ms"] >= 0
+        assert set(result["answers"]) == {"pace", "lane", "route", "attention"}
+        assert result["answers"]["pace"]["choice"] == "approach"
+        assert result["answers"]["lane"]["choice"] == "left"
+        assert result["answers"]["route"]["choice"] == "straight"
+        assert result["answers"]["attention"]["choice"] == "signal"
+
+
+def test_driving_rejects_invalid_observations():
+    with TestClient(create_app(Engine(FakeBackend()))) as client:
+        state = copy.deepcopy(OBSERVATION)
+        state["ego"]["speed_kmh"] = -1
+        assert (
+            client.post("/drive/api/decide", json={"sequence": 0, "state": state}).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                "/drive/api/decide", json={"sequence": -1, "state": OBSERVATION}
+            ).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                "/drive/api/decide", json={"sequence": 0, "state": OBSERVATION, "model": "external"}
+            ).status_code
+            == 422
+        )
+
+
+def test_driving_reports_context_overflow():
+    with TestClient(create_app(Engine(FakeBackend(), ctx=10))) as client:
+        response = client.post("/drive/api/decide", json={"sequence": 0, "state": OBSERVATION})
+        assert response.status_code == 422
+        assert "no truncation" in response.json()["detail"]

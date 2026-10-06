@@ -70,6 +70,15 @@ Spark-X2.5-4B at 8 bit on an RTX 5060 Ti, recorded with the earlier MLX runtime 
 
 ---
 
+## Local 3D driving sandbox
+
+Run `uv run rizzo serve`, open <http://127.0.0.1:8017/drive>, and click **Start driving**.
+The city simulator extracted from Jev Drive calls the resident Rizzo engine directly for
+speed, lane, route and attention decisions. Simulation time pauses during local inference.
+Weather, traffic, turns, hazards and brake assist are available in the panel. Three.js is
+bundled locally; no npm installation, TypeSafe SDK, API key or second server is needed.
+The previous driving demo remains at `/drive-classic`.
+
 ## Quickstart
 
 You need Python ≥ 3.11, git and [uv](https://docs.astral.sh/uv/). The same four commands work on

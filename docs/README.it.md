@@ -83,9 +83,29 @@ esempi pronti, editor JSON grezzo per entrambi gli endpoint, barre di probabilit
 (round-trip, inferenza, prefill), token dello state in cache, numero di microbatch e comando cURL.
 Pagina singola senza dipendenze esterne, servita dallo stesso processo.
 
-## Demo guida simulata
+## Guida 3D
 
-Con il server avviato: <http://127.0.0.1:8017/drive>. Una strada vista dall'alto con tre corsie,
+Con `uv run rizzo serve` avviato, apri <http://127.0.0.1:8017/drive> e premi
+**Start driving**. Il simulatore urbano estratto da Jev Drive è incluso nel pacchetto:
+non servono un secondo server, npm, SDK TypeSafe o chiavi API.
+
+Il browser invia osservazioni validate a `POST /drive/api/decide`; lo stesso Engine locale
+sceglie velocità, corsia, percorso e attenzione. Il tempo simulato si ferma durante
+l'inferenza. Meteo, traffico, svolte, ostacoli, minimappa e assistenza alla frenata
+sono disponibili nel pannello. Spazio avvia/ferma, C cambia camera, R ripristina.
+Three.js 0.180.0 è incluso e servito localmente; si usano i font di sistema.
+È una simulazione didattica: gli altri veicoli e l'assistenza sono deterministici.
+
+Controlli dell'integrazione:
+
+```bash
+uv run --extra test pytest -q tests/test_driving.py
+node --test --test-isolation=none tests/driving_simulation.test.mjs
+```
+
+## Demo guida simulata classica
+
+Con il server avviato: <http://127.0.0.1:8017/drive-classic>. Una strada vista dall'alto con tre corsie,
 ostacoli fissi e un traguardo a 600 m. A ogni secondo simulato il browser invia posizione,
 velocità, corsia e distanza degli ostacoli a `POST /v1/decisions`; il modello sceglie fra accelerare,
 mantenere, frenare e cambiare corsia. Ogni opzione include la posizione e la velocità risultanti,

@@ -16,3 +16,8 @@ that keep their own licenses:
 "Jev" and "TypeSafe" are names of TypeSafe's products; this project is independent and not affiliated.
 The SemIf fixtures and evaluator used for the published comparison are MIT-licensed by their author
 and are not included in this repository.
+
+The city driving simulator and its regression tests were adapted from Jev Drive
+(https://github.com/vedssharma/jev-drive), from the user's local checkout.
+Three.js 0.180.0 is redistributed under MIT; its license is included in
+src/rizzo_flow/driving/vendor/LICENSE.three.
