@@ -118,5 +118,5 @@ def create_app(engine, api_key=None):
     def root():
         return RedirectResponse("/playground")
 
-    register_driving(app, engine)
+    register_driving(app, engine, authorize)
     return app

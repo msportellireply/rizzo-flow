@@ -80,6 +80,53 @@ def test_driving_reports_context_overflow():
         assert "no truncation" in response.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    ("navigation", "choice", "calls"),
+    [
+        ({}, "straight", 4),
+        ({"requested_direction": "left"}, "left", 3),
+        (
+            {"destination": {"east": 160, "north": 100, "distance_m": 180, "reached": False}},
+            "left",
+            3,
+        ),
+        ({"planned_direction": "right"}, "keep", 3),
+        ({"turning": True}, "keep", 3),
+    ],
+)
+def test_navigator_routes_skip_model_scoring(navigation, choice, calls):
+    class CountingBackend(FakeBackend):
+        calls = 0
+
+        def score(self, prefix, jobs, mode):
+            self.calls += 1
+            if calls == 3:
+                assert all(job.id != "route" for job in jobs)
+            return super().score(prefix, jobs, mode)
+
+    backend = CountingBackend()
+    state = copy.deepcopy(OBSERVATION)
+    state["navigation"].update(navigation)
+    with TestClient(create_app(Engine(backend))) as client:
+        response = client.post("/drive/api/decide", json={"sequence": 1, "state": state})
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["answers"]["route"]["choice"] == choice
+        assert result["routing_source"] == ("navigator" if calls == 3 else "clm")
+        assert sum(result["answers"]["route"]["probabilities"].values()) == pytest.approx(1)
+        assert backend.calls == calls
+
+
+def test_driving_api_key():
+    with TestClient(create_app(Engine(FakeBackend()), api_key="test-key")) as client:
+        assert client.get("/drive/api/status").status_code == 401
+        payload = {"sequence": 0, "state": OBSERVATION}
+        assert client.post("/drive/api/decide", json=payload).status_code == 401
+        headers = {"Authorization": "Bearer test-key"}
+        assert client.get("/drive/api/status", headers=headers).status_code == 200
+        assert client.post("/drive/api/decide", json=payload, headers=headers).status_code == 200
+
+
 def driving_scenario(name):
     """Controlled cases isolate decisions from unrelated background traffic."""
     state = copy.deepcopy(OBSERVATION)
