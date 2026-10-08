@@ -1,4 +1,4 @@
-import {INITIAL_FRAME, DIRECTIONS, basis, worldPoint, localPoint, junctionKey, streetName, nextCenter, junctionSignal, outgoingFrame, turnGeometry, turnPose, mod} from './network.js';
+import {INITIAL_FRAME, BLOCK, DIRECTIONS, basis, worldPoint, localPoint, junctionKey, streetName, nextCenter, junctionSignal, outgoingFrame, turnGeometry, turnPose, mod, routeToDestination} from './network.js';
 
 export const LANES = [2, 6];
 export const WEATHER = {
@@ -10,7 +10,7 @@ export const WEATHER = {
 export const PACES = {stop: 0, approach: null, crawl: 10, slow: 22, steady: 35, cruise: 50};
 export const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 // Solve d = v * reactionTime + v² / (2a), preserving a small stop-line buffer.
-// This is a motion primitive selected by Rizzo, not an independent driving policy.
+// This is a motion primitive selected by CLM, not an independent driving policy.
 export function signalApproach(speed, distance, color, grip) {
   const deceleration = 2.5 * grip, reactionTime = .8, buffer = 1.5;
   const brakingDistance = speed * reactionTime + speed ** 2 / (2 * deceleration) + buffer;
@@ -39,6 +39,7 @@ export class Simulation {
   reset() {
     this.seed = 17; this.time = 0; this.s = 0; this.x = 6; this.speed = 0;
     this.frame = {...INITIAL_FRAME}; this.turn = null; this.plan = null; this.routeRequest = 'auto';
+    this.destination = null; this.arrived = false; this.routeRequestVersion = 0;
     this.routeEpoch = 0; this.turns = 0; this.passes = 0; this.junctions = 0; this.passing = null;
     this.visits = new Map(); this.trail = []; this.lastTrailDistance = -2; this.laneChangedAt = -100;
     this.targetLane = 1; this.targetSpeed = 0; this.pace = 'stop'; this.weather = 'clear'; this.night = false;
@@ -130,10 +131,35 @@ export class Simulation {
     this.lastDecisionAt = -100;
   }
   setRouteRequest(request) {
+    if (this.destination) this.clearDestination();
     this.routeRequest = request;
     this.routeRequestVersion = (this.routeRequestVersion || 0) + 1;
     if (!this.turn && this.signal.distance > 35) {this.plan = null; this.routeEpoch++;}
-    this.event(request === 'auto' ? 'Rizzo will explore different streets' : `Requested next available ${request} route`);
+    this.event(request === 'auto' ? 'CLM will explore different streets' : `Requested next available ${request} route`);
+  }
+  setDestination(i, j) {
+    if (!Number.isInteger(i) || !Number.isInteger(j) || Math.abs(i) > 20 || Math.abs(j) > 20) return false;
+    this.destination = {east: i * BLOCK, north: 100 + j * BLOCK};this.arrived = false;
+    this.routeRequest = 'auto';this.routeRequestVersion++;
+    if (!this.turn && this.signal.distance > 35) this.plan = null;
+    this.routeEpoch++;this.lastDecisionAt = -100;
+    this.event(`Destination set: junction (${i}, ${j})`);return true;
+  }
+  clearDestination() {
+    this.destination = null;this.arrived = false;this.routeEpoch++;this.lastDecisionAt = -100;
+    if (!this.turn && this.signal.distance > 35) this.plan = null;
+    this.event('Destination cleared · free exploration');
+  }
+  destinationRoute() {
+    if (!this.destination || this.arrived) return [];
+    const sig = this.signal;
+    let start = {...sig.point, heading: this.frame.heading};
+    if (this.turn || this.plan) {
+      const exit = this.turn?.exitFrame || outgoingFrame(this.frame, sig.center, this.plan.direction);
+      const next = this.signalFor(exit, 17);
+      start = {...next.point, heading: exit.heading};
+    }
+    return routeToDestination(start, this.destination);
   }
   laneGaps(lane) {
     const visible = this.environment.visibility * (this.night ? .7 : 1);
@@ -190,9 +216,10 @@ export class Simulation {
     const turnClear = conflicts.length === 0;
     return {current_street: streetName(this.frame), heading: DIRECTIONS[this.frame.heading],
       planned_direction: this.plan?.direction || 'undecided', requested_direction: this.routeRequest,
-      preferred_direction: this.routeRequest === 'auto' ? ranked[0].direction : this.routeRequest,
+      preferred_direction: this.destination ? (this.destinationRoute()[0]?.direction || 'straight') : this.routeRequest === 'auto' ? ranked[0].direction : this.routeRequest,
       required_lane: this.plan?.direction === 'left' ? 0 : this.plan?.direction === 'right' ? 1 : -1,
-      turning: !!this.turn, turn_clear: turnClear, turn_conflict_distance_m: conflicts[0]?.distance_m ?? null, options};
+      turning: !!this.turn, turn_clear: turnClear, turn_conflict_distance_m: conflicts[0]?.distance_m ?? null, options,
+      destination: this.destination ? {...this.destination, distance_m: Math.hypot(this.pose.east - this.destination.east, this.pose.north - this.destination.north), reached: this.arrived} : null};
   }
   observe() {
     const sig = this.signal, visibility = this.environment.visibility * (this.night ? .7 : 1), users = [];
@@ -224,11 +251,14 @@ export class Simulation {
       navigation: this.navigation(), overtaking: this.overtaking};
   }
   applyDecision(answers) {
-    const route = answers.route?.choice;
+    if (this.arrived) return;
+    const constrained = this.destination || this.routeRequest !== 'auto';
+    const atDestination = this.destination && this.signal.key === junctionKey(this.destination);
+    const route = atDestination ? 'keep' : constrained ? this.navigation().preferred_direction : answers.route?.choice;
     if (!this.plan && !this.turn && ['straight','left','right'].includes(route) && this.signal.distance > 25) {
       const sig = this.signal, frame = outgoingFrame(this.frame, sig.center, route);
       this.plan = {direction: route, key: sig.key, center: sig.center, requestVersion: this.routeRequestVersion || 0};
-      this.event(`Rizzo route: ${route} onto ${streetName(frame)}`, 'jev');
+      this.event(`${constrained ? 'Navigation' : 'CLM'} route: ${route} onto ${streetName(frame)}`, 'jev');
     }
     this.pace = answers.pace.choice;
     this.targetSpeed = (this.pace === 'approach' ? this.signalApproach.approach_speed_kmh : PACES[this.pace]) / 3.6;
@@ -350,12 +380,12 @@ export class Simulation {
       this.turn=null;this.turns++;this.passing=null;
       this.event(`Turned ${direction} · ${DIRECTIONS[this.frame.heading]} on ${streetName(this.frame)}`,'jev');
     }
-    if(this.routeRequest!=='auto' && this.plan?.requestVersion === (this.routeRequestVersion || 0))this.routeRequest='auto';
+    if(this.routeRequest!=='auto' && direction===this.routeRequest && this.plan?.requestVersion === (this.routeRequestVersion || 0))this.routeRequest='auto';
     this.plan=null;this.routeEpoch++;
     // Keep the recent pace through the exit; the normal freshness watchdog still applies.
   }
   step(dt) {
-    if(this.halted)return;
+    if(this.halted||this.arrived)return;
     this.time+=dt;this.stepTraffic(dt);
     const sig=this.signal;
     if(this.plan&&this.plan.key!==sig.key&&!this.turn)this.finishJunction('straight',this.plan.key);
@@ -363,7 +393,16 @@ export class Simulation {
     if(this.pace==='approach')this.targetSpeed=this.signalApproach.approach_speed_kmh/3.6;
     else this.targetSpeed=PACES[this.pace]/3.6;
     let target=this.targetSpeed;this.intervention='';
-    if(this.time-this.lastDecisionAt>2.5){target=0;this.intervention='Waiting for fresh Rizzo decision';}
+    if(this.destination&&!this.turn&&sig.distance>=0&&sig.key===junctionKey(this.destination)){
+      // Arrive before the junction's stop line, irrespective of its signal colour.
+      target=Math.min(target,Math.sqrt(5*this.environment.grip*Math.max(0,sig.distance-1.5)));
+      this.targetSpeed=Math.min(this.targetSpeed,target);
+      if(sig.distance<=2&&this.speed<.2){
+        this.speed=0;this.targetSpeed=0;this.pace='stop';this.arrived=true;this.routeEpoch++;
+        this.event('Destination reached · stopped before the junction');return;
+      }
+    }
+    if(this.time-this.lastDecisionAt>2.5){target=0;this.intervention='Waiting for fresh CLM decision';}
     const plannedTurn=this.plan&&this.plan.direction!=='straight';
     if(plannedTurn||this.turn){
       const maneuver=this.turn || turnGeometry(this.frame,sig.center,this.plan.direction);
@@ -373,7 +412,7 @@ export class Simulation {
       if(!this.turn&&sig.distance<16){
         const lane=this.plan.direction==='left'?0:1;
         if(Math.abs(this.x-LANES[lane])>.3){
-          // No last-second cuts across lanes: carry on and ask Rizzo again next block.
+          // No last-second cuts across lanes: carry on and ask CLM again next block.
           this.event('Turn skipped: required lane not reached in time','shield');this.plan.direction='straight';
         }else{
           const conflict=this.turnConflict(turnGeometry(this.frame,sig.center,this.plan.direction));

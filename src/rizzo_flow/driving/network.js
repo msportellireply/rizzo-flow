@@ -39,6 +39,37 @@ export function outgoingFrame(frame, center, direction) {
   const p = worldPoint(frame, 0, center);
   return {...p, heading: mod(frame.heading + (direction === 'left' ? -1 : direction === 'right' ? 1 : 0), 4), offset: 0};
 }
+// Shortest route on the street grid, including heading: U-turns are unavailable.
+// The first point is the next junction, so an in-progress maneuver stays committed.
+export function routeToDestination(start, destination) {
+  const origin = {i: Math.round(start.east / BLOCK), j: Math.round((start.north - 100) / BLOCK), heading: start.heading};
+  const goal = {i: Math.round(destination.east / BLOCK), j: Math.round((destination.north - 100) / BLOCK)};
+  const key = n => `${n.i},${n.j},${n.heading}`;
+  const minI = Math.min(origin.i, goal.i) - 2, maxI = Math.max(origin.i, goal.i) + 2;
+  const minJ = Math.min(origin.j, goal.j) - 2, maxJ = Math.max(origin.j, goal.j) + 2;
+  const queue = [{...origin, parent: -1}], seen = new Set([key(origin)]);
+  for (let index = 0; index < queue.length; index++) {
+    const node = queue[index];
+    if (node.i === goal.i && node.j === goal.j) {
+      const route = [];
+      for (let at = index; at >= 0; at = queue[at].parent) {
+        const n = queue[at];
+        route.push({east: n.i * BLOCK, north: 100 + n.j * BLOCK, direction: null});
+        if (n.parent >= 0) route[route.length - 1].incoming = n.direction;
+      }
+      route.reverse();
+      for (let i = 0; i < route.length - 1; i++) route[i].direction = route[i + 1].incoming;
+      return route;
+    }
+    for (const direction of ['straight', 'left', 'right']) {
+      const heading = mod(node.heading + (direction === 'left' ? -1 : direction === 'right' ? 1 : 0), 4);
+      const b = basis(heading), next = {i: node.i + b.fe, j: node.j + b.fn, heading, parent: index, direction};
+      if (next.i < minI || next.i > maxI || next.j < minJ || next.j > maxJ || seen.has(key(next))) continue;
+      seen.add(key(next));queue.push(next);
+    }
+  }
+  return [];
+}
 export function turnGeometry(frame, center, direction) {
   const radius = direction === 'right' ? 8 : 16;
   return {frame: {...frame}, center, direction, radius, length: radius * Math.PI / 2, progress: 0,
