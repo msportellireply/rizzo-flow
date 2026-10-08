@@ -80,6 +80,53 @@ def test_driving_reports_context_overflow():
         assert "no truncation" in response.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    ("navigation", "choice", "calls"),
+    [
+        ({}, "straight", 4),
+        ({"requested_direction": "left"}, "left", 3),
+        (
+            {"destination": {"east": 160, "north": 100, "distance_m": 180, "reached": False}},
+            "left",
+            3,
+        ),
+        ({"planned_direction": "right"}, "keep", 3),
+        ({"turning": True}, "keep", 3),
+    ],
+)
+def test_navigator_routes_skip_model_scoring(navigation, choice, calls):
+    class CountingBackend(FakeBackend):
+        calls = 0
+
+        def score(self, prefix, jobs, mode):
+            self.calls += 1
+            if calls == 3:
+                assert all(job.id != "route" for job in jobs)
+            return super().score(prefix, jobs, mode)
+
+    backend = CountingBackend()
+    state = copy.deepcopy(OBSERVATION)
+    state["navigation"].update(navigation)
+    with TestClient(create_app(Engine(backend))) as client:
+        response = client.post("/drive/api/decide", json={"sequence": 1, "state": state})
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["answers"]["route"]["choice"] == choice
+        assert result["routing_source"] == ("navigator" if calls == 3 else "clm")
+        assert sum(result["answers"]["route"]["probabilities"].values()) == pytest.approx(1)
+        assert backend.calls == calls
+
+
+def test_driving_api_key():
+    with TestClient(create_app(Engine(FakeBackend()), api_key="test-key")) as client:
+        assert client.get("/drive/api/status").status_code == 401
+        payload = {"sequence": 0, "state": OBSERVATION}
+        assert client.post("/drive/api/decide", json=payload).status_code == 401
+        headers = {"Authorization": "Bearer test-key"}
+        assert client.get("/drive/api/status", headers=headers).status_code == 200
+        assert client.post("/drive/api/decide", json=payload, headers=headers).status_code == 200
+
+
 def driving_scenario(name):
     """Controlled cases isolate decisions from unrelated background traffic."""
     state = copy.deepcopy(OBSERVATION)
@@ -99,7 +146,7 @@ def driving_scenario(name):
             {"kind": "pedestrian", "distance_m": 12, "lane": 1, "speed_kmh": 4, "crossing": True}
         ]
         state["navigation"].update(planned_direction="left", required_lane=0)
-        expected.update(pace="stop", lane="left", route="keep", attention="pedestrian")
+        expected.update(pace="stop", route="keep", attention="pedestrian")
     elif name == "clear_turn":
         state["navigation"].update(turning=True, planned_direction="left", required_lane=0)
         state["signal"].update(
@@ -107,6 +154,113 @@ def driving_scenario(name):
         )
         state["overtaking"]["lane_change_allowed"] = False
         expected.update(pace="slow", route="keep")
+    elif name in {"barrier_right", "barrier_left", "barrier_unsafe", "barrier_crawl"}:
+        lane = 0 if name == "barrier_left" else 1
+        state["ego"].update(lane=lane, speed_kmh=0, stopping_distance_m=0)
+        state["road_users"] = [
+            {"kind": "barrier", "distance_m": 40, "lane": lane, "speed_kmh": 0, "crossing": False}
+        ]
+        state["lanes"][lane].update(gap_ahead_m=38, lead_speed_kmh=0)
+        expected.update(
+            pace="crawl", lane="right" if lane == 0 else "left", attention="obstruction"
+        )
+        if name == "barrier_unsafe":
+            state["lanes"][0].update(safe_to_enter=False, gap_behind_m=4, rear_speed_kmh=60)
+            state["ego"].update(speed_kmh=35, stopping_distance_m=20)
+            state["road_users"][0]["distance_m"] = 15
+            expected.update(pace="stop", lane="hold")
+        elif name == "barrier_crawl":
+            state["road_users"][0]["distance_m"] = 20
+            state["lanes"][1]["gap_ahead_m"] = 18
+    elif name in {"ambulance", "ambulance_blocked", "combined", "both_lanes_blocked"}:
+        state["ego"]["lane"] = 0
+        state["road_users"] = [
+            {"kind": "ambulance", "distance_m": -30, "lane": 0, "speed_kmh": 60, "crossing": False}
+        ]
+        expected.update(lane="right", attention="emergency")
+        if name != "ambulance":
+            state["road_users"].append(
+                {"kind": "barrier", "distance_m": 20, "lane": 1, "speed_kmh": 0, "crossing": False}
+            )
+            state["lanes"][1].update(safe_to_enter=False, gap_ahead_m=18)
+            expected["lane"] = "hold"
+        if name == "combined":
+            state["ego"].update(speed_kmh=35, stopping_distance_m=20)
+            state["road_users"].append(
+                {
+                    "kind": "pedestrian",
+                    "distance_m": 10,
+                    "lane": 0,
+                    "speed_kmh": 4,
+                    "crossing": True,
+                }
+            )
+            state["environment"].update(
+                weather="snow", time_of_day="night", grip=0.32, visibility_m=59.5
+            )
+            state["signal"].update(color="red", approach_phase="braking", approach_speed_kmh=15)
+            expected.update(pace="stop", attention="pedestrian")
+        elif name == "both_lanes_blocked":
+            state["road_users"].append(
+                {"kind": "barrier", "distance_m": 6, "lane": 0, "speed_kmh": 0, "crossing": False}
+            )
+            state["lanes"][0].update(safe_to_enter=False, gap_ahead_m=4)
+            expected.update(pace="stop", attention="obstruction")
+    elif name in {"slow_car", "red_queue", "cross_traffic", "blocked_turn"}:
+        state["ego"].update(speed_kmh=22, stopping_distance_m=8)
+        if name == "blocked_turn":
+            state["navigation"].update(
+                turning=True,
+                planned_direction="right",
+                required_lane=1,
+                turn_clear=False,
+                turn_conflict_distance_m=6,
+            )
+            state["signal"].update(in_intersection=True, stop_line_distance_m=-5)
+            state["overtaking"]["lane_change_allowed"] = False
+            kind, distance, lane, speed = "barrier", 6, 1, 0
+            expected.update(pace="stop", route="keep", attention="obstruction")
+        elif name == "cross_traffic":
+            kind, distance, lane, speed = "cross_traffic", 8, -1, 22
+            expected.update(pace="stop", attention="traffic")
+        else:
+            kind, distance, lane, speed = "car", 40, 1, 18
+            state["lanes"][1].update(gap_ahead_m=40, lead_speed_kmh=18)
+            state["overtaking"].update(beneficial=True, lead_gap_m=40, lead_speed_kmh=18)
+            expected.update(pace="slow", lane="left", attention="traffic")
+            if name == "red_queue":
+                distance, speed = 5, 0
+                state["lanes"][1].update(gap_ahead_m=5, lead_speed_kmh=0)
+                state["overtaking"].update(beneficial=False, lead_gap_m=5, lead_speed_kmh=0)
+                state["signal"].update(
+                    color="red",
+                    stop_line_distance_m=10,
+                    approach_phase="braking",
+                    approach_speed_kmh=15,
+                )
+                expected.update(pace="stop", lane="hold")
+        state["road_users"] = [
+            {
+                "kind": kind,
+                "distance_m": distance,
+                "lane": lane,
+                "speed_kmh": speed,
+                "crossing": kind == "cross_traffic",
+            }
+        ]
+    elif name == "barrier_passed":
+        state["road_users"] = [
+            {"kind": "barrier", "distance_m": -30, "lane": 1, "speed_kmh": 0, "crossing": False}
+        ]
+        state["ego"]["lane"] = 0
+        expected["lane"] = "right"
+    elif name in {"rain", "fog", "snow", "night"}:
+        if name == "night":
+            state["environment"].update(time_of_day="night", visibility_m=154)
+        else:
+            grip, visibility = {"rain": (0.62, 120), "fog": (0.85, 55), "snow": (0.32, 85)}[name]
+            state["environment"].update(weather=name, grip=grip, visibility_m=visibility)
+        expected.update(pace="steady" if name == "rain" else "slow", attention="weather")
     elif name != "clear":
         raise ValueError(name)
     return state, expected
@@ -126,7 +280,32 @@ def driving_backend():
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("scenario", ["clear", "red_at_line", "pedestrian", "clear_turn"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "clear",
+        "red_at_line",
+        "pedestrian",
+        "clear_turn",
+        "barrier_right",
+        "barrier_left",
+        "barrier_unsafe",
+        "barrier_crawl",
+        "ambulance",
+        "ambulance_blocked",
+        "combined",
+        "both_lanes_blocked",
+        "barrier_passed",
+        "rain",
+        "fog",
+        "snow",
+        "night",
+        "slow_car",
+        "red_queue",
+        "cross_traffic",
+        "blocked_turn",
+    ],
+)
 def test_driving_model_scenarios(driving_backend, scenario):
     state, expected = driving_scenario(scenario)
     engine = Engine(driving_backend)
@@ -150,3 +329,16 @@ def test_driving_observations_do_not_leak_future_routes_or_passed_signals():
     observations = question_states(State.model_validate(state))
     assert observations["pace"]["signal"]["color"] == "red"
     assert observations["attention"]["signal"]["approach_phase"] == "at_line"
+
+
+def test_lane_question_receives_all_simultaneous_hazards():
+    state, _ = driving_scenario("combined")
+    observations = question_states(State.model_validate(state))
+    assert {actor["kind"] for actor in observations["lane"]["road_users"]} == {
+        "ambulance",
+        "barrier",
+        "pedestrian",
+    }
+    assert observations["lane"]["road_users"] == state["road_users"]
+    assert observations["pace"]["road_users"] == state["road_users"]
+    assert observations["attention"]["road_users"] == state["road_users"]
